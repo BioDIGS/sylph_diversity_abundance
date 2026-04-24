@@ -18,139 +18,92 @@ library(vegan)
 library(ecodist)
 ```
 
-### Load and clean data 
+### Set database variable
 
-Load the sylph output data. This code currently reads the short read output, but replacing line 19 with line 20 will read the long read output instead. 
+We will consider sylph outputs from two different databases, the commonly used GTDB r226 database, and the larger GlobDB database. We will set an variable here to determine which database we want to analyze the output from. 
 
-```{r load data}
-# Read in filename metadata 
-file_metadata <- read.csv("../data/sylph_file_metadata.csv") # short read output
-# file_metadata <- read.csv("../data/sylph_file_metadata_long_read.csv") # use this for long read output
-
-file_list <- file_metadata$file_name
-
-# Initialize a list to store the data frames, using file names 
-data_frames <- vector(mode = "list", length = length(file_list))
-names(data_frames) <- file_list
-
-# Loop through each file in the file list
-for (file_name in file_list) {
-  # Construct the full path to the file
-  file_path <- file.path("../data/", file_name)
-  
-  # Get column names
-  columns <- str_split(readLines(file_path)[2], pattern = '\t')[[1]]
-  
-  # Read the file into a data frame, specifying the separator and column names
-  df <- read.table(file_path, sep = "\t", col.names = columns, header = FALSE, fill = TRUE)
-  
-  # Add the data frame to the list, using the file name (without extension) as the key
-  data_frames[[file_name]] <- df
-}
-
-# Print the number of files processed
-cat("Number of files processed:", length(data_frames), "\n")
+```{r}
+# db <- "GTDB"
+db <- "GlobDB"
 ```
 
-There are two different sets of files, paired files that start with "HHGCVDRX3" and use "L001" and "L002" to denote the same samples processed through different lanes, and single files that start with "tax_profile_merged". These files have slightly different clade names, so we will fix that. 
+### Set soil and site data variables
 
-```{r clean variable name for clade name}
-head(file_list) # file names for paired files
-tail(file_list) # file names for pre-merged files
-paired_files <- which(str_detect(file_list, "HHGCVDRX3"))
-merged_files <- which(str_detect(file_list, "tax_profile"))
+```{r}
+restricted <- FALSE # TRUE if using data for all sites
+if (restricted) {
+  fig_folder <- "../figures_restricted/" # if restricted, save figures one folder up, not git tracked
+} else {
+  fig_folder <- "figures/" # if not restricted, save as figures in this repo 
+}
+local <- FALSE # if FALSE pull site and soil data from GitHub, if TRUE pull locally from data folder one directory up 
+snapshot <- "20260310" # snapshot of data we are pulling (if non-restricted)
 
-names(data_frames[[paired_files[1]]]) # variable names for data from paired files
-names(data_frames[[merged_files[1]]]) # variable names for data from merged files
+if (restricted & (!local)) {
+  stop("If using restricted data, it needs to be saved locally.")
+}
+```
 
-data_frames[paired_files] <- lapply(data_frames[paired_files],
-                                    function(x) {
-                                      x %>% rename(clade_name = X.clade_name)
-                                    })
-names(data_frames[[paired_files[1]]]) # now clade names for all elements of data_frames are the same
+### Load and clean data 
+
+Load in the table of sylph output. Each row represents a taxon identified in the sylph run, and each column represents a sample. 
+
+```{r load data}
+sylph_output <- read_tsv(paste0("../data/merged_relative_abundance_", db, ".tsv"), col_names = TRUE)
+names(sylph_output)[-1] <- str_remove(names(sylph_output)[-1], "^([^/]*/){8}") %>% # remove up through the first 8 "/" in file name, since these are uninformative or redundant
+  str_remove(".fastq.gz") # remove file extension 
+sylph_output <- sylph_output %>%
+  pivot_longer(names(sylph_output)[-1], names_to = "sample_id", values_to = "rel_abund") %>% # wide to long format 
+  separate_wider_delim(sample_id, names = c("platform", "sample_id"), delim = "/") %>% # split sequencing platform from sample id
+  mutate(sample_id = str_remove(sample_id, "Molecular_")) %>% 
+  separate_wider_delim(sample_id, names = c("site_id", "replicate", "read_type"), delim = "_", 
+                       cols_remove = FALSE, too_few = "align_start") %>% # split sample id into site id, replicate, and read type
+  select(-read_type) # remove read type (this is R1 for all short reads, NA for all long reads )
 ```
 
 The sylph output includes a row for each taxonomic level found in the sample. We want to perform an analysis at the order level, so we have to remove all rows that correspond to broader or finer taxonomic levels. 
 
 ```{r trim data}
-# for each element in data_frames, make a new element in trimmed_data that only retains rows at the order level
-trimmed_data <- lapply(data_frames, function(x) {
-  x %>% 
-    filter(str_detect(clade_name, "o_"), # keep rows that have order, denoted by "o__"
+# only retain rows at the order level
+trimmed_data <- sylph_output %>%
+  filter(str_detect(clade_name, "o_"), # keep rows that have order, denoted by "o__"
            !str_detect(clade_name, "f_")) # remove rows that have family, denoted by "f__"
-})
 ```
 
 Now that we have data at the order level, we will remove other taxonomic information and remove the "o__" prefix. 
 
 ```{r clean taxonomy}
-trimmed_data <- lapply(trimmed_data, function(x) {
-  x %>%
-    mutate(clade_name = str_replace(clade_name,".*?o__", "" )) # remove taxonomy info up to and including "o__" 
-})
-```
-
-Next, we will combine list objects from pairs of objects with the same file names. Some samples were run across multiple lanes (e.g., have both "L001" to denote lane 1 and "L002" to denote lane 2), and we want to combine these. Other samples were combined prior to sylph analysis. 
-
-```{r combine site data}
-# Create a base identifier for each site by removing 'L001' and 'L002' from the output name
-base_identifiers <- unique(str_remove(names(trimmed_data), "L00[12]"))
-# Initialize an empty list with length of the number o f base identifiers
-combined_data <- vector(mode = "list", length = length(base_identifiers))
-names(combined_data) <- base_identifiers
-
-# Loop through each key in the trimmed_data list
-for (key in names(trimmed_data)) {
-  # Get the base identifier for this output
-  base_identifier <- str_remove(key, "L00[12]")
-  
-  # Combine the current data frame with the existing one for the base identifier
-  combined_data[[base_identifier]] <- rbind(combined_data[[base_identifier]], trimmed_data[[key]])
-}
+trimmed_data <- trimmed_data %>%
+  mutate(clade_name = str_replace(clade_name,".*?o__", "" )) # remove taxonomy info up to and including "o__" 
 ```
 
 For each sample, we will group by order and calculate mean relative abundances and sequence abundances. 
-
 ```{r average site data}
-combined_data <- lapply(combined_data, function(x) {
-  x %>%
-    group_by(clade_name) %>% # group by order
-     mutate( # force abundances to be numeric variables
-      relative_abundance = as.numeric(relative_abundance),
-      sequence_abundance = as.numeric(sequence_abundance)
-    ) %>%
-    summarise(across(where(is.numeric), \(x) sum(x, na.rm = TRUE))) %>% # sum abundances at order level
-    ungroup()
-})
-
-paired_files <- which(str_detect(names(combined_data), "HHGCVDRX3"))
-# for paired files, divide abundance sums by 2
-combined_data[paired_files] <- lapply(combined_data[paired_files], function(x) {
-  x %>%
-    mutate(across(contains("abundance"), ~ .x / 2))
-})
-```
-
-Finally, merge list elements into a single table, using list element names as ids. 
-
-```{r sylph table}
-# convert sylph output list to dataframe, converting list element names to id column
-sylph_data <- bind_rows(combined_data, .id = "id")
+combined_data <- trimmed_data %>% 
+  group_by(clade_name, platform, site_id, replicate, sample_id) %>% # aggregate over clade_name
+  summarise(rel_abund_sum = sum(rel_abund, na.rm = TRUE), .groups = "drop") %>%
+  mutate(read_type = ifelse(platform == "NovaSeq 6000", "short", "long"),
+         site_read_id = paste(site_id, read_type, sep = "_"))
 ```
 
 We will now read in soil and site data. 
 
 ```{r load soil and site data}
 # read in site data and soil data
-local <- FALSE
-snapshot <- "20260310"
-
 if (local) {
-  site_data <- read.csv(paste0("../data/BioDIGS_sites_", snapshot, ".csv"), row.names = 1)
-  soil_data <- read.csv(paste0("../data/BioDIGS_soil_", snapshot, ".csv"), row.names = 1)
+  if (restricted) {
+    site_data <- read.csv("../data/data_restricted/BioDIGS Sample Data and Kit Request MASTER - ALL_SAMPLES - SITE DATA.csv")
+    soil_data <- read.csv("../data/data_restricted/BioDIGS Sample Data and Kit Request MASTER - ALL_SAMPLES - SOIL SAMPLES.csv")
+    seq_data <- read.csv("../data/data_restricted/BioDIGS Sample Data and Kit Request MASTER - ALL_SAMPLES - SEQ SAMPLES.csv")
+  } else {
+    site_data <- read.csv(paste0("../data/BioDIGS_sites_", snapshot, ".csv"), row.names = 1)
+    soil_data <- read.csv(paste0("../data/BioDIGS_soil_", snapshot, ".csv"), row.names = 1)
+    seq_data <- read.csv(paste0("../data/BioDIGS_seq_", snapshot, ".csv"), row.names = 1)
+  }
 } else {
   site_data <- read.csv(paste0("https://raw.githubusercontent.com/FredHutch/GDSCNsoilsites/refs/heads/main/data/snapshots/BioDIGS_sites_", snapshot, ".csv"), row.names = 1)
   soil_data <- read.csv(paste0("https://raw.githubusercontent.com/FredHutch/GDSCNsoilsites/refs/heads/main/data/snapshots/BioDIGS_soil_", snapshot, ".csv"), row.names = 1)
+  seq_data <- read.csv(paste0("https://raw.githubusercontent.com/FredHutch/GDSCNsoilsites/refs/heads/main/data/snapshots/BioDIGS_seq_", snapshot, ".csv"), row.names = 1)
 }
 ```
 
@@ -165,9 +118,17 @@ soil_data <- soil_data %>%
   # As can't be detected lower than 3.0
   mutate(As_EPA3051 = case_when(As_EPA3051 == "< 3.0" ~ "0", As_EPA3051 == "<3.0" ~ "0", TRUE ~ As_EPA3051)) %>%
   # Cd can't be detected lower than 0.2
-  mutate(Cd_EPA3051 = case_when(Cd_EPA3051 == "< 0.2" ~ "0", Cd_EPA3051 == "<0.2" ~ "0", TRUE ~ Cd_EPA3051)) %>%
+  mutate(Cd_EPA3051 = case_when(Cd_EPA3051 == "< 0.2" ~ "0", Cd_EPA3051 == "<0.2" ~ "0", Cd_EPA3051 == "< 0.20" ~ "0", TRUE ~ Cd_EPA3051)) %>%
   # Cu edge case
   mutate(Cu_EPA3051 = case_when(Cu_EPA3051 == "< 2.0" ~ "0", TRUE ~ Cu_EPA3051)) %>%
+  # Pb edge case
+  mutate(Pb_EPA3051 = as.character(Pb_EPA3051)) %>% 
+  mutate(Pb_EPA3051 = case_when(Pb_EPA3051 == "< 2.0" ~ "0", TRUE ~ Pb_EPA3051)) %>%
+  # when OM_by_LOI_pct is coded as ISS, set to NA
+  mutate(OM_by_LOI_pct = case_when(OM_by_LOI_pct == "ISS" ~ NA, TRUE ~ OM_by_LOI_pct)) %>% 
+  # for environmental variables with "sampling date not yet available", set as NA 
+  mutate(across(c(vap, pre, cld, tmp), 
+                ~ na_if(.x, "sampling date not yet available"))) %>% 
   # aggregate to site level
   group_by(site_id) %>%
   # average metal data at the site level
@@ -194,15 +155,41 @@ site_data <- site_data %>%
   mutate(mgmt_type = as.numeric(as.factor(mgmt_type)))
 ```
 
+Check on sequencing date in sequencing metadata.
+
+```{r investigate sequencing date}
+seq_data <- 
+  seq_data %>%
+  add_count(seq_date, name = "n_per_date") %>% # count number of samples sequenced per date
+  mutate(seq_date_cat = ifelse(n_per_date < 5, "other", seq_date)) %>% # if less than 5 samples on that date, set category to "other"
+  select(-n_per_date) %>%
+  mutate(sequencing_instrument = ifelse(sequencing_instrument == FALSE, NA, sequencing_instrument),
+         read_type = ifelse(sequencing_instrument == "NovaSeq 6000", "short", "long"))
+
+# check on if any sites were sequenced on different days
+seq_data %>%
+  group_by(site_id, sequencing_instrument) %>%
+  summarise(n_seq_dates = n_distinct(seq_date_cat)) %>%
+  filter(n_seq_dates > 1)
+
+# aggregate sequencing data to the site level 
+seq_data <- seq_data %>%
+  filter(!is.na(sequencing_instrument)) %>% 
+  group_by(site_id, read_type) %>%
+  summarise(seq_date_summ = ifelse(
+    n_distinct(seq_date_cat, na.rm = TRUE) == 1,
+    first(seq_date_cat), "multiple"
+  ))
+```
+
 We now combine the sylph output with the sites and soil data. 
 
 ```{r join data}
 # combine sylph data with metal and climate data 
-full_data <- sylph_data %>% 
-  mutate(id = str_replace(id,"__", "_L001_")) %>% # add lane back into paired ids
-  left_join(file_metadata, by = c("id" = "file_name")) %>% # join with file metadata to include site_id
+full_data <- combined_data %>% 
   left_join(soil_data, by = "site_id") %>% # join with soil data that has been aggregated to the site level
-  left_join(site_data, by = "site_id") # join with site data 
+  left_join(site_data, by = "site_id") %>% # join with site data 
+  left_join(seq_data, by = c("site_id", "read_type")) # join with sequencing data
 ```
 
 ### Plot data 
@@ -211,20 +198,21 @@ First, aggregate samples to the level of site id, and calculate relative abundan
 
 ```{r community data}
 community_data <- full_data %>%
-  group_by(site_id, clade_name) %>% # aggregate at order and sampling site level
-  summarize(relative_abundance = mean(relative_abundance), # get average relative abundance of orders at each site
+  group_by(site_id, read_type, site_read_id, clade_name) %>% # aggregate at order and sampling site level (and separate short reads and long reads)
+  summarize(relative_abundance = mean(rel_abund_sum), # get average relative abundance of orders at each site
             .groups = "drop_last") %>% 
   mutate(mult_factor = sum(relative_abundance)) %>% 
   ungroup() %>%
   mutate(relative_abundance = relative_abundance / mult_factor) %>% # rescale relative abundances after aggregation 
-  select(site_id, clade_name, relative_abundance)
+  select(site_id, read_type, site_read_id, clade_name, relative_abundance)
 
 # make a wide version of this data frame, rows are sites and columns are clade abundances 
 community_data_wide <- 
   community_data %>% 
+  select(-site_id, -read_type) %>% 
   pivot_wider(names_from = clade_name, values_from = relative_abundance) %>% 
-  arrange(site_id) %>% 
-  column_to_rownames("site_id")
+  arrange(site_read_id) %>% 
+  column_to_rownames("site_read_id")
 # replace NA with zero for orders that were not detected at each site 
 community_data_wide[is.na(community_data_wide)] <- 0
 ```
@@ -235,9 +223,9 @@ Create an environmental data frame, with one row per site.
 # Create environmental data frame 
 clim_data_perm <- 
   full_data %>% 
-  drop_na(site_id) %>%  # remove rows missing site id
-  filter(site_id != "") %>% 
-  select(!c(clade_name, relative_abundance, sequence_abundance, ANI..if.strain.level., id, date, root, seq_id, site_rep_id)) %>% # remove sequencing related variables 
+  tidyr::drop_na(site_id) %>%  # remove rows missing site id
+  dplyr::filter(site_id != "") %>% 
+  select(!c(clade_name, platform, read_type, site_read_id, replicate, sample_id, rel_abund_sum, seq_date_summ)) %>% # remove sequencing related variables 
   distinct() %>% # keep only unique rows, one per site 
   arrange(site_id) %>%
   column_to_rownames("site_id")
@@ -267,6 +255,11 @@ Calculate Bray-Curtis distances between samples based on sets of variables and d
 bray_curtis_dist_comm <- vegdist(community_data_wide, method = "bray")
 bray_curtis_pcoa_comm <- pco(bray_curtis_dist_comm)
 
+# ndms on distances from order abundances
+set.seed(15)
+nmds <- metaMDS(community_data_wide, distance = "bray", k = 2, trymax = 100)
+nmds$stress # fair/good representation
+
 # pcoa on distances from heavy metal measurements
 bray_curtis_dist_heavy <- clim_data_perm %>%
   select(all_of(heavy_metal_vars)) %>%
@@ -289,10 +282,13 @@ bray_curtis_dist_envt <- clim_data_perm %>%
 bray_curtis_pcoa_envt <- pco(bray_curtis_dist_envt)
 
 # data frame of first two to three vectors from each pcoa 
-bray_curtis_pcoa_df <- data.frame(site_id = rownames(bray_curtis_pcoa_comm$vectors),
+bray_curtis_pcoa_df <- data.frame(site_read_id = rownames(bray_curtis_pcoa_comm$vectors),
                                   pcoa1 = bray_curtis_pcoa_comm$vectors[, 1], 
                                   pcoa2 = bray_curtis_pcoa_comm$vectors[, 2],
                                   pcoa3 = bray_curtis_pcoa_comm$vectors[, 3]) %>%
+  left_join(data.frame(scores(nmds)$sites) %>% rownames_to_column(var = "site_read_id")) %>% 
+  mutate(site_id = str_remove(site_read_id, "_.*"),
+         read_type = str_remove(site_read_id, "^.*_")) %>% 
   left_join(data.frame(site_id = rownames(bray_curtis_pcoa_heavy$vectors),
                        heavy1 = bray_curtis_pcoa_heavy$vectors[, 1],
                        heavy2 = bray_curtis_pcoa_heavy$vectors[, 2]), 
@@ -306,37 +302,126 @@ bray_curtis_pcoa_df <- data.frame(site_id = rownames(bray_curtis_pcoa_comm$vecto
                        envt2 = bray_curtis_pcoa_envt$vectors[, 2]),
             by = "site_id") %>%
   left_join(clim_data_perm %>%
-              rownames_to_column(var = "site_id"), by = "site_id")
+              rownames_to_column(var = "site_id"), by = "site_id") %>%
+  left_join(full_data %>% select(site_read_id, seq_date_summ) %>% distinct(), by = "site_read_id") %>%
+  left_join(data.frame(site_id = site_data$site_id, 
+                       state = str_remove(site_data$origin,"^.*,\\s*")), by = "site_id")
 
 # plot order abundance pcoa, colored by pH 
-ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = water_pH)) +
+ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = water_pH, shape = read_type)) +
   geom_point(size = 5) +
   labs(x = "PC1",
        y = "PC2",
-       color = "Water pH") +
+       color = "Water pH", 
+       shape = "Read type") +
   scale_color_viridis_c(end = .7) +
+  scale_shape_manual(values = c(12, 16)) + 
   theme(title = element_text(size = 10)) # makes titles smaller
-ggsave("figures/pcoa_colored_by_ph.png", height = 5, width = 6)
+ggsave(paste0(fig_folder, "pcoa_colored_by_ph_", db, ".png"), height = 5, width = 6)
 
 # plot order abundance pcoa, colored by temperature 
-ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = tmp)) +
+ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = tmp, shape = read_type)) +
   geom_point(size = 5) +
   labs(x = "PC1",
        y = "PC2",
-       color = "Temperature") +
+       color = "Temperature",
+       shape = "Read type") +
   scale_color_viridis_c(end = .7) +
+  scale_shape_manual(values = c(12, 16)) + 
   theme(title = element_text(size = 10)) 
-ggsave("figures/pcoa_colored_by_temp.png", height = 5, width = 6)
+ggsave(paste0(fig_folder, "pcoa_colored_by_temp_", db, ".png"), height = 5, width = 6)
 
 # plot order abundance pcoa, colored by first coordinate of heavy metals pcoa
-ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = heavy1)) +
+ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = heavy1, shape = read_type)) +
   geom_point(size = 5) +
   labs(x = "PC1",
        y = "PC2",
-       color = "Heavy\nmetals\nPC 1") +
+       color = "Heavy\nmetals\nPC 1",
+       shape = "Read type") +
   scale_color_viridis_c(end = .7) +
+  scale_shape_manual(values = c(12, 16)) + 
   theme(title = element_text(size = 10)) 
-ggsave("figures/pcoa_colored_by_heavy_metals.png", height = 5, width = 6)
+ggsave(paste0(fig_folder, "pcoa_colored_by_heavy_metals_", db, ".png"), height = 5, width = 6)
+
+# plot order abundance pcoa, colored by sequencing data
+ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = seq_date_summ, shape = read_type)) +
+  geom_point(size = 5) +
+  labs(x = "PC1",
+       y = "PC2",
+       color = "Sequencing date",
+       shape = "Read type") +
+  scale_shape_manual(values = c(12, 16)) + 
+  theme(title = element_text(size = 10)) 
+ggsave(paste0(fig_folder, "pcoa_colored_by_sequencing_date_", db, ".png"), height = 5, width = 6)
+
+# plot order abundance pcoa, colored by origin state
+ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = state, shape = read_type)) +
+  geom_point(size = 5) +
+  labs(x = "PC1",
+       y = "PC2",
+       color = "State",
+       shape = "Read type") +
+  scale_shape_manual(values = c(12, 16)) + 
+  theme(title = element_text(size = 10)) 
+ggsave(paste0(fig_folder, "pcoa_colored_by_state_", db, ".png"), height = 7.5, width = 9)
+
+# plot order abundance nmds, colored by pH 
+ggplot(data = bray_curtis_pcoa_df, aes(x=NMDS1, y=NMDS2, color = water_pH, shape = read_type)) +
+  geom_point(size = 5) +
+  labs(x = "NMDS1",
+       y = "NMDS2",
+       color = "Water pH", 
+       shape = "Read type") +
+  scale_color_viridis_c(end = .7) +
+  scale_shape_manual(values = c(12, 16)) + 
+  theme(title = element_text(size = 10)) # makes titles smaller
+ggsave(paste0(fig_folder, "nmds_colored_by_ph_", db, ".png"), height = 5, width = 6)
+
+# plot order abundance nmds, colored by temperature 
+ggplot(data = bray_curtis_pcoa_df, aes(x=NMDS1, y=NMDS2, color = tmp, shape = read_type)) +
+  geom_point(size = 5) +
+  labs(x = "NMDS1",
+       y = "NMDS2",
+       color = "Temperature",
+       shape = "Read type") +
+  scale_color_viridis_c(end = .7) +
+  scale_shape_manual(values = c(12, 16)) + 
+  theme(title = element_text(size = 10)) 
+ggsave(paste0(fig_folder, "nmds_colored_by_temp_", db, ".png"), height = 5, width = 6)
+
+# plot order abundance nmds, colored by first coordinate of heavy metals pcoa
+ggplot(data = bray_curtis_pcoa_df, aes(x=NMDS1, y=NMDS2, color = heavy1, shape = read_type)) +
+  geom_point(size = 5) +
+  labs(x = "NMDS1",
+       y = "NMDS2",
+       color = "Heavy\nmetals\nPC 1",
+       shape = "Read type") +
+  scale_color_viridis_c(end = .7) +
+  scale_shape_manual(values = c(12, 16)) + 
+  theme(title = element_text(size = 10)) 
+ggsave(paste0(fig_folder, "nmds_colored_by_heavy_metals_", db, ".png"), height = 5, width = 6)
+
+# plot order abundance nmds, colored by sequencing data
+ggplot(data = bray_curtis_pcoa_df, aes(x=NMDS1, y=NMDS2, color = seq_date_summ, shape = read_type)) +
+  geom_point(size = 5) +
+  labs(x = "NMDS1",
+       y = "NMDS2",
+       color = "Sequencing date",
+       shape = "Read type") +
+  scale_shape_manual(values = c(12, 16)) + 
+  theme(title = element_text(size = 10)) 
+ggsave(paste0(fig_folder, "nmds_colored_by_sequencing_date_", db, ".png"), height = 5, width = 6)
+
+# plot order abundance nmds, colored by state
+ggplot(data = bray_curtis_pcoa_df, aes(x=NMDS1, y=NMDS2, color = state, shape = read_type)) +
+  geom_point(size = 5) +
+  labs(x = "NMDS1",
+       y = "NMDS2",
+       color = "State",
+       shape = "Read type") +
+  scale_shape_manual(values = c(12, 16)) + 
+  theme(title = element_text(size = 10)) 
+ggsave(paste0(fig_folder, "nmds_colored_by_state_", db, ".png"), height = 7.5, width = 9)
 ```
 
 Perform permanovas to test whether variation in Bray–Curtis dissimilarities of order-level community composition is associated with environmental variables.
@@ -354,17 +439,28 @@ Generate a heatmap of order abundances.
 
 ```{r heatmap of orders, fig.width = 15, fig.height = 9}
 # plot relative abundances of all detected orders in each site 
-ggplot(community_data, aes(
-  fct_reorder(clade_name, relative_abundance, .desc = T, .fun = sum), 
-  site_id, fill= relative_abundance)) + 
+community_data %>%
+  filter(relative_abundance > 0) %>% 
+  mutate(read_type = factor(read_type, levels = c("short", "long"),
+                            labels = c("Short\nreads", "Long\nreads"))) %>%
+  #arrange(read_type, site_id) %>%
+  mutate(site_read_id = factor(site_read_id, levels = unique(site_read_id))) %>%
+  ggplot(aes(
+    fct_reorder(clade_name, relative_abundance, .desc = T, .fun = sum), 
+    site_read_id, 
+    fill= relative_abundance)) + 
   geom_tile() +
   labs(y = "Sampling site", x = "Order", fill = "Relative\nabundance") +
   scale_fill_viridis_c() +
   theme_minimal(base_size = 13) +
   theme(
-    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
-  ) 
-ggsave("figures/heatmap_ordered.png", width = 15, height = 9)
+    #axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 4),
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(size = 7)
+  ) +
+  facet_grid(rows = "read_type", scales = "free_y", space = "free") +
+  scale_y_discrete(labels = function(x) sub("_.*", "", x))
+ggsave(paste0(fig_folder, "heatmap_ordered_", db, ".png"), width = 15, height = 9)
 ```
 
 Generate a heatmap of environmental variables. 
@@ -383,7 +479,6 @@ clim_data_perm_plot$name <- factor( # make environmental variable a factor and r
   x = clim_data_perm_plot$name,
   levels = vars)
 
-
 # plot standardized environmental variable values by site
 ggplot(clim_data_perm_plot, aes(
   name,
@@ -393,23 +488,27 @@ ggplot(clim_data_perm_plot, aes(
   scale_fill_viridis_c() +
   theme_minimal(base_size = 13) +
   theme(
-    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    axis.text.y = element_text(size = 7)
   ) 
-ggsave("figures/heatmap_envt_ordered.png", width = 15, height = 9)
+ggsave(paste0(fig_folder, "heatmap_env_ordered.png"), width = 15, height = 9)
 ```
 
 Calculate observed Shannon diversity index and richness for each site, and plot Shannon diversity index by environmental variables.
 
-```{r richness and heavy metals, fig.width = 15, fig.height = 9}
+```{r richness and heavy metals, fig.width = 15, fig.height = 9, warning=FALSE}
 plot_dat <- 
   data.frame(div_shannon = diversity(community_data_wide, index = "shannon")) %>% # calculate Shannon diversity index
-  rownames_to_column() %>% 
-  left_join(rownames_to_column(clim_data_perm), by = "rowname") # add in environmental variables 
+  rownames_to_column(var = "site_read_id") %>% 
+  mutate(site_id = str_remove(site_read_id, "_.*"),
+         read_type = str_remove(site_read_id, "^.*_")) %>%
+  left_join(rownames_to_column(clim_data_perm, var = "site_id"), 
+            by = "site_id") # add in environmental variables 
 
 plot_dat <-
   plot_dat %>%
   left_join(data.frame(richness = specnumber(community_data_wide)) %>% # calculate richness
-              rownames_to_column(), by = "rowname")
+              rownames_to_column(var = "site_read_id"), by = "site_read_id")
 
 plot_dat <- plot_dat %>% pivot_longer(all_of(vars)) # make long data frame
 
@@ -419,7 +518,7 @@ ggplot(data = plot_dat, aes(x = log(value), y = div_shannon)) + # y is shannon d
   facet_wrap(~name, scales = "free_x") + # separate plots by environmental variable 
   labs(x = "Environmental measurement (log scale)", y = "H' (Shannon Diversity)") +
   theme_minimal(base_size = 13)
-
+ggsave(paste0(fig_folder, "shannon_env_", db, ".png"), width = 15, height = 9)
 ```
 
 Next, we generate stacked bar charts of order relative abundances across sites. 
@@ -427,38 +526,48 @@ Next, we generate stacked bar charts of order relative abundances across sites.
 First, keep all orders and plot at the site replicate level.
 
 ```{r stacked bar chart}
-ggplot(
-  full_data,
-  aes(
-    x = site_rep_id,
-    y = relative_abundance,
-    fill = clade_name
-  )
-) +
+full_data %>%
+  group_by(sample_id, read_type, clade_name) %>% # aggregate at order and sampling site level
+  summarize(relative_abundance = mean(rel_abund_sum), # get average relative abundance of orders at each site
+            .groups = "drop_last") %>% 
+  mutate(mult_factor = sum(relative_abundance)) %>% 
+  ungroup() %>%
+  mutate(relative_abundance = 100 * relative_abundance / mult_factor, # rescale relative abundances after aggregation 
+         read_type = factor(read_type, levels = c("short", "long"),
+                            labels = c("Short reads", "Long reads"))) %>% 
+  ggplot(
+    aes(
+      x = sample_id,
+      y = relative_abundance,
+      fill = clade_name
+    )
+  ) +
   geom_bar(stat = "identity", position = 'stack') +
-  labs(x = "Site Location", y = "Relative Abundance", fill = "Order name") +
+  labs(x = "Sample", y = "Relative Abundance", fill = "Order name") +
   scale_fill_discrete(guide = "none") +
   theme_minimal() +
   theme(axis.text.x = element_text(
     angle = 90,
     hjust = 1,
     vjust = .5,
-    size = 7
-  )) 
-ggsave("figures/rel_abund_by_sample.png", height = 9, width = 15)
+    size = 5
+  )) +
+  facet_grid(rows = NULL, cols = vars(read_type), scales = "free_x", space = "free")
+ggsave(paste0(fig_folder, "rel_abund_by_sample_", db, ".png"), height = 6, width = 10)
 ```
 
 Next, aggregate by site. 
 
 ```{r bar chart aggregated by site}
-ggplot(
-  community_data,
-  aes(
-    x = site_id,
+community_data %>% 
+  mutate(read_type = factor(read_type, levels = c("short", "long"),
+                            labels = c("Short reads", "Long reads"))) %>%
+  ggplot(aes(
+    x = site_read_id,
     y = relative_abundance * 100,
     fill = clade_name
   )
-) +
+  ) +
   geom_bar(stat = "identity", position = 'stack') +
   labs(x = "Site Location", y = "Relative Abundance", fill = "Order name") +
   scale_fill_discrete(guide = "none") +
@@ -467,24 +576,126 @@ ggplot(
     angle = 90,
     hjust = 1,
     vjust = .5,
-    size = 7
-  )) 
-ggsave("figures/rel_abund_by_site.png", height = 9, width = 15)
+    size = 6
+  )) +
+  facet_grid(rows = NULL, cols = vars(read_type), scales = "free_x", space = "free") +
+  scale_x_discrete(labels = function(x) sub("_.*", "", x))
+ggsave(paste0(fig_folder, "rel_abund_by_site_", db, ".png"), height = 6, width = 10)
+```
+
+Make the same plot, ordering the sites by pH. 
+
+```{r bar chart aggregated by site ordered by pH}
+site_order <- community_data %>%
+  left_join(soil_data %>% select(site_id, water_pH), by = "site_id") %>% 
+  distinct(site_read_id, water_pH) %>%
+  arrange(desc(water_pH)) %>%
+  pull(site_read_id)
+community_data %>% 
+  mutate(read_type = factor(read_type, levels = c("short", "long"),
+                            labels = c("Short reads", "Long reads")),
+         site_read_id = factor(site_read_id, levels = site_order)) %>%
+  ggplot(aes(
+    x = site_read_id,
+    y = relative_abundance * 100,
+    fill = clade_name
+  )
+  ) +
+  geom_bar(stat = "identity", position = 'stack') +
+  labs(x = "Site Location", y = "Relative Abundance", fill = "Order name") +
+  scale_fill_discrete(guide = "none") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    hjust = 1,
+    vjust = .5,
+    size = 6
+  )) +
+  facet_grid(rows = NULL, cols = vars(read_type), scales = "free_x", space = "free") +
+  scale_x_discrete(labels = function(x) sub("_.*", "", x))
+#ggsave(paste0(fig_folder, "rel_abund_by_site_pH_", db, ".png"), height = 9, width = 15)
+```
+
+Make the same plot, ordering the sites by temperature. 
+
+```{r bar chart aggregated by site ordered by temperature}
+site_order <- community_data %>%
+  left_join(soil_data %>% select(site_id, tmp), by = "site_id") %>% 
+  distinct(site_read_id, tmp) %>%
+  arrange(desc(tmp)) %>%
+  pull(site_read_id)
+community_data %>% 
+  mutate(read_type = factor(read_type, levels = c("short", "long"),
+                            labels = c("Short reads", "Long reads")),
+         site_read_id = factor(site_read_id, levels = site_order)) %>%
+  ggplot(aes(
+    x = site_read_id,
+    y = relative_abundance * 100,
+    fill = clade_name
+  )
+  ) +
+  geom_bar(stat = "identity", position = 'stack') +
+  labs(x = "Site Location", y = "Relative Abundance", fill = "Order name") +
+  scale_fill_discrete(guide = "none") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    hjust = 1,
+    vjust = .5,
+    size = 6
+  )) +
+  facet_grid(rows = NULL, cols = vars(read_type), scales = "free_x", space = "free") +
+  scale_x_discrete(labels = function(x) sub("_.*", "", x))
+#ggsave(paste0(fig_folder, "rel_abund_by_site_tmp_", db, ".png"), height = 9, width = 15)
+```
+
+```{r bar chart aggregated by site comparing short and long reads}
+community_data %>% 
+  mutate(read_type = factor(read_type, levels = c("short", "long"),
+                            labels = c("Short reads", "Long reads"))) %>%
+  group_by(site_id) %>%
+  filter(n_distinct(read_type) == 2) %>%
+  ungroup() %>% 
+  ggplot(aes(
+    x = site_read_id,
+    y = relative_abundance * 100,
+    fill = clade_name
+  )
+  ) +
+  geom_bar(stat = "identity", position = 'stack') +
+  labs(x = "Site Location", y = "Relative Abundance", fill = "Order name") +
+  scale_fill_discrete(guide = "none") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    hjust = 1,
+    vjust = .5,
+    size = 8
+  )) +
+  scale_x_discrete(labels = function(x) sub("_", " ", x)) +
+  facet_grid(cols = vars(site_id), scales = "free_x", space = "free")
+ggsave(paste0(fig_folder, "rel_abund_by_site_long_v_short_", db, ".png"), height = 6, width = 10)
 ```
 
 Finally, aggregate by site and only keep the ten orders with the highest average relative abundances across sites. Collapse all other orders into an "other" category. 
 
 ```{r bar chart top n orders}
 n_orders <- 10
-top_n_clades <- community_data %>%
+top_n_clades <- full_data %>%
+  group_by(site_id, clade_name) %>% # aggregate at order and sampling site level
+  summarize(relative_abundance = mean(rel_abund_sum), # get average relative abundance of orders at each site
+            .groups = "drop_last") %>% 
+  mutate(mult_factor = sum(relative_abundance)) %>% 
+  ungroup() %>%
+  mutate(relative_abundance = relative_abundance / mult_factor) %>%
   group_by(clade_name) %>% # aggregate over site 
   summarise(sum_rel_abundance = sum(relative_abundance, na.rm = TRUE), .groups = "drop") %>% # sum of relative abundances over all sites 
   arrange(desc(sum_rel_abundance)) %>%
-  slice_head(n = n_orders) %>% # get ten orders with the largest average relative abundance
+  slice_head(n = n_orders) %>% # get n_orders orders with the highest average relative abundance
   pull(clade_name)
 community_data_top_n <- community_data %>%
   mutate(clade_name = ifelse(clade_name %in% top_n_clades, clade_name, "other")) %>% # if order isn't one of the top ten, recode it as "other" 
-  group_by(site_id, clade_name) %>% # aggregate "other" category
+  group_by(site_read_id, site_id, read_type, clade_name) %>% # aggregate "other" category
   summarise(relative_abundance = 100 * sum(relative_abundance), .groups = "drop") # sum relative abundance across "other" category
 
 order_levels <- community_data_top_n %>%
@@ -497,7 +708,9 @@ order_levels <- community_data_top_n %>%
 community_data_top_n <- community_data_top_n %>%
   mutate( # make clade_name a factor to order by mean relative abundances, add "other" in first 
     clade_name = factor(clade_name, levels = c("other", order_levels))
-  )
+  ) %>%
+  mutate(read_type = factor(read_type, levels = c("short", "long"),
+                            labels = c("Short reads", "Long reads"))) 
 
 palette_rest <- scales::hue_pal()(length(order_levels))  # set color palette for plot
 names(palette_rest) <- order_levels
@@ -506,12 +719,86 @@ fill_values <- c(other = "gray70", palette_rest) # set "other" to be gray
 # make stacked bar plot
 ggplot(
   community_data_top_n,
-  aes(x = site_id, y = relative_abundance, fill = clade_name)
+  aes(x = site_read_id, y = relative_abundance, fill = clade_name)
 ) +
   geom_col(position = "stack") +
   labs(x = "Site Location", y = "Relative Abundance", fill = "Order name") +
   scale_fill_manual(values = fill_values, breaks = c(rev(order_levels), "other")) +
   theme_minimal() +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5, size = 7)) 
-ggsave("figures/top_rel_abund_by_site.png", height = 9, width = 15)
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5, size = 6)) +
+  facet_grid(rows = NULL, cols = vars(read_type), scales = "free_x", space = "free") +
+  scale_x_discrete(labels = function(x) sub("_.*", "", x))
+ggsave(paste0(fig_folder, "top_rel_abund_by_site_", db, ".png"), height = 6, width = 10.5)
+```
+
+Make the same plot, with sites ordered by pH.
+
+```{r bar chart top n orders ordered by pH}
+site_order <- community_data %>%
+  left_join(soil_data %>% select(site_id, water_pH), by = "site_id") %>% 
+  distinct(site_read_id, water_pH) %>%
+  arrange(desc(water_pH)) %>%
+  pull(site_read_id)
+
+# make stacked bar plot
+community_data_top_n %>%
+  mutate(site_read_id = factor(site_read_id, levels = site_order)) %>%
+  ggplot(aes(x = site_read_id, y = relative_abundance, fill = clade_name)) +
+  geom_col(position = "stack") +
+  labs(x = "Site Location", y = "Relative Abundance", fill = "Order name") +
+  scale_fill_manual(values = fill_values, breaks = c(rev(order_levels), "other")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5, size = 6)) +
+  facet_grid(rows = NULL, cols = vars(read_type), scales = "free_x", space = "free") +
+  scale_x_discrete(labels = function(x) sub("_.*", "", x))
+#ggsave(paste0(fig_folder, "top_rel_abund_by_site_pH_", db, ".png"), height = 9, width = 15)
+```
+
+Make the same plot, with sites ordered by temperature.
+
+```{r bar chart top n orders ordered by temperature}
+site_order <- community_data %>%
+  left_join(soil_data %>% select(site_id, tmp), by = "site_id") %>% 
+  distinct(site_read_id, tmp) %>%
+  arrange(desc(tmp)) %>%
+  pull(site_read_id)
+
+# make stacked bar plot
+community_data_top_n %>%
+  mutate(site_read_id = factor(site_read_id, levels = site_order)) %>%
+  ggplot(aes(x = site_read_id, y = relative_abundance, fill = clade_name)) +
+  geom_col(position = "stack") +
+  labs(x = "Site Location", y = "Relative Abundance", fill = "Order name") +
+  scale_fill_manual(values = fill_values, breaks = c(rev(order_levels), "other")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5, size = 6)) +
+  facet_grid(rows = NULL, cols = vars(read_type), scales = "free_x", space = "free") +
+  scale_x_discrete(labels = function(x) sub("_.*", "", x))
+#ggsave(paste0(fig_folder, "top_rel_abund_by_site_tmp_", db, ".png"), height = 9, width = 15)
+```
+
+```{r bar chart top orders aggregated by site comparing short and long reads}
+community_data_top_n %>% 
+  group_by(site_id) %>%
+  filter(n_distinct(read_type) == 2) %>%
+  ungroup() %>% 
+  ggplot(aes(
+    x = site_read_id,
+    y = relative_abundance,
+    fill = clade_name
+  )
+  ) +
+  geom_bar(stat = "identity", position = 'stack') +
+  labs(x = "Site Location", y = "Relative Abundance", fill = "Order name") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    hjust = 1,
+    vjust = .5,
+    size = 8
+  )) +
+  scale_fill_manual(values = fill_values, breaks = c(rev(order_levels), "other")) +
+  scale_x_discrete(labels = function(x) sub("_", " ", x)) +
+  facet_grid(cols = vars(site_id), scales = "free_x", space = "free")
+ggsave(paste0(fig_folder, "top_rel_abund_by_site_long_v_short_", db, ".png"), height = 6, width = 10)
 ```
