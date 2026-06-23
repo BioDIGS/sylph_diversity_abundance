@@ -23,8 +23,8 @@ library(ecodist)
 We will consider sylph outputs from two different databases, the commonly used GTDB r226 database, and the larger GlobDB database. We will set an variable here to determine which database we want to analyze the output from. 
 
 ```{r}
-# db <- "GTDB"
-db <- "GlobDB"
+db <- "GTDB"
+# db <- "GlobDB"
 ```
 
 ### Set soil and site data variables
@@ -433,6 +433,13 @@ permanova_ph <- adonis2(community_data_wide ~ water_pH + tmp + heavy1, data = br
 permanova_tmp <- adonis2(community_data_wide ~ tmp, data = bray_curtis_pcoa_df, permutations = 9999, na.action = na.omit)
 # model with first principal coordinate from heavy metals pcoa
 permanova_heavy1 <- adonis2(community_data_wide ~ heavy1, data = bray_curtis_pcoa_df, permutations = 9999, na.action = na.omit)
+
+# full model, with marginal tests for each environmental variable 
+adonis2(community_data_wide ~ tmp + water_pH + heavy1,
+  data = bray_curtis_pcoa_df,
+  permutations = 9999,
+  by = "margin",
+  na.action = na.omit)
 ```
 
 Generate a heatmap of order abundances. 
@@ -498,7 +505,8 @@ Calculate observed Shannon diversity index and richness for each site, and plot 
 
 ```{r richness and heavy metals, fig.width = 15, fig.height = 9, warning=FALSE}
 plot_dat <- 
-  data.frame(div_shannon = diversity(community_data_wide, index = "shannon")) %>% # calculate Shannon diversity index
+  data.frame(div_shannon = diversity(community_data_wide, index = "shannon"), # calculate Shannon diversity index
+             div_simpson = diversity(community_data_wide, index = "simpson")) %>% 
   rownames_to_column(var = "site_read_id") %>% 
   mutate(site_id = str_remove(site_read_id, "_.*"),
          read_type = str_remove(site_read_id, "^.*_")) %>%
@@ -510,6 +518,16 @@ plot_dat <-
   left_join(data.frame(richness = specnumber(community_data_wide)) %>% # calculate richness
               rownames_to_column(var = "site_read_id"), by = "site_read_id")
 
+bc_dispersion <- betadisper(bray_curtis_dist_comm, group = plot_dat$read_type)
+
+plot_dat <-
+  plot_dat %>%
+  left_join(data.frame(dispersion = bc_dispersion$distances,
+                       site_read_id = plot_dat$site_read_id),
+            by = "site_read_id")
+
+diversity_dat <- plot_dat
+
 plot_dat <- plot_dat %>% pivot_longer(all_of(vars)) # make long data frame
 
 ggplot(data = plot_dat, aes(x = log(value), y = div_shannon)) + # y is shannon diversity, x is log of environmental variable
@@ -519,6 +537,21 @@ ggplot(data = plot_dat, aes(x = log(value), y = div_shannon)) + # y is shannon d
   labs(x = "Environmental measurement (log scale)", y = "H' (Shannon Diversity)") +
   theme_minimal(base_size = 13)
 ggsave(paste0(fig_folder, "shannon_env_", db, ".png"), width = 15, height = 9)
+```
+
+```{r}
+div_plot_dat <- diversity_dat %>%
+  select(site_read_id, div_shannon, div_simpson, read_type, richness, dispersion) %>%
+  rename(Shannon = div_shannon, Simpson = div_simpson, Richness = richness, Dispersion = dispersion) %>%
+  pivot_longer(cols = c("Shannon", "Simpson", "Richness", "Dispersion"), 
+               names_to = "metric", values_to = "value")
+div_plot_dat %>%
+  ggplot(aes(x = read_type, y = value)) + 
+  geom_boxplot() + 
+  facet_wrap(~ metric, scales = "free", nrow = 1) +
+  scale_y_continuous(limits = c(0, NA)) + 
+  theme_bw(base_size = 14) + 
+  labs(x = "Read type", y = "Diversity metric value")
 ```
 
 Next, we generate stacked bar charts of order relative abundances across sites. 
