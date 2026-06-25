@@ -127,8 +127,9 @@ soil_data <- soil_data %>%
   # when OM_by_LOI_pct is coded as ISS, set to NA
   mutate(OM_by_LOI_pct = case_when(OM_by_LOI_pct == "ISS" ~ NA, TRUE ~ OM_by_LOI_pct)) %>% 
   # for environmental variables with "sampling date not yet available", set as NA 
-  mutate(across(c(vap, pre, cld, tmp), 
-                ~ na_if(.x, "sampling date not yet available"))) %>% 
+  mutate(across(c(vap, pre, cld, tmp),
+                ~ na_if(as.character(.x), "sampling date not yet available"))) %>%
+  mutate(across(c(vap, pre, cld, tmp), as.numeric)) %>%
   # aggregate to site level
   group_by(site_id) %>%
   # average metal data at the site level
@@ -319,6 +320,13 @@ ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = water_pH, shape
   theme(title = element_text(size = 10)) # makes titles smaller
 ggsave(paste0(fig_folder, "pcoa_colored_by_ph_", db, ".png"), height = 5, width = 6)
 
+ggplot(data = bray_curtis_pcoa_df, aes(x = pcoa1, y = water_pH, color = read_type)) +
+  geom_point(size = 3) +
+  labs(x = "PC1",
+       y = "Water pH", 
+       color = "Read type") +
+  theme(title = element_text(size = 10)) # makes titles smaller
+
 # plot order abundance pcoa, colored by temperature 
 ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = tmp, shape = read_type)) +
   geom_point(size = 5) +
@@ -331,6 +339,13 @@ ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = tmp, shape = re
   theme(title = element_text(size = 10)) 
 ggsave(paste0(fig_folder, "pcoa_colored_by_temp_", db, ".png"), height = 5, width = 6)
 
+ggplot(data = bray_curtis_pcoa_df, aes(x = pcoa1, y = tmp, color = read_type)) +
+  geom_point(size = 3) +
+  labs(x = "PC1",
+       y = "Temperature", 
+       color = "Read type") +
+  theme(title = element_text(size = 10)) # makes titles smaller
+
 # plot order abundance pcoa, colored by first coordinate of heavy metals pcoa
 ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = heavy1, shape = read_type)) +
   geom_point(size = 5) +
@@ -342,6 +357,22 @@ ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = heavy1, shape =
   scale_shape_manual(values = c(12, 16)) + 
   theme(title = element_text(size = 10)) 
 ggsave(paste0(fig_folder, "pcoa_colored_by_heavy_metals_", db, ".png"), height = 5, width = 6)
+
+ggplot(data = bray_curtis_pcoa_df, aes(x = pcoa1, y = heavy1, color = read_type)) +
+  geom_point(size = 3) +
+  labs(x = "PC1",
+       y = "Heavy metals PC 1", 
+       color = "Read type") +
+  theme(title = element_text(size = 10)) # makes titles smaller
+
+bray_curtis_pcoa_df %>% 
+  select(pcoa1, heavy1, read_type, water_pH, tmp) %>% 
+  rename("Metals PC1" = heavy1, Temperature = tmp, "Water pH" = water_pH) %>% 
+  pivot_longer(cols = c("Metals PC1", "Water pH", Temperature), names_to = "envir_var", values_to = "envir_val") %>%
+  ggplot(aes(x = pcoa1, y = envir_val, color = read_type)) + 
+  geom_point(size = 3) + 
+  facet_wrap(~envir_var, scale = "free") + 
+  labs(x = "Principal component 1", y = "Environmental variable", color = "Read type")
 
 # plot order abundance pcoa, colored by sequencing data
 ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = seq_date_summ, shape = read_type)) +
