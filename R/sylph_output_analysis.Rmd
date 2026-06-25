@@ -540,8 +540,9 @@ ggsave(paste0(fig_folder, "shannon_env_", db, ".png"), width = 15, height = 9)
 ```
 
 ```{r}
-div_plot_dat <- diversity_dat %>%
-  select(site_read_id, div_shannon, div_simpson, read_type, richness, dispersion) %>%
+div_dat <- diversity_dat %>% 
+  select(site_read_id, div_shannon, div_simpson, read_type, richness, dispersion, water_pH)
+div_plot_dat <- div_dat %>%
   rename(Shannon = div_shannon, Simpson = div_simpson, Richness = richness, Dispersion = dispersion) %>%
   pivot_longer(cols = c("Shannon", "Simpson", "Richness", "Dispersion"), 
                names_to = "metric", values_to = "value")
@@ -552,6 +553,36 @@ div_plot_dat %>%
   scale_y_continuous(limits = c(0, NA)) + 
   theme_bw(base_size = 14) + 
   labs(x = "Read type", y = "Diversity metric value")
+```
+
+```{r}
+mod1 <- lm(div_shannon ~ water_pH, data = div_dat)
+summary(mod1)
+r2 <- summary(mod1)$r.squared
+div_dat %>%
+  ggplot(aes(x = water_pH, y = div_shannon)) + 
+  geom_point() + 
+  geom_smooth(method = "lm") +
+  labs(x = "Water pH", y = "Shannon diversity") +
+  annotate("text",
+           x = -Inf, y = Inf,
+           label = paste0("R^2 == ", round(r2, 3)),
+           parse = TRUE,
+           hjust = -0.1, vjust = 1.2)
+
+mod2 <- lm(richness ~ water_pH, data = div_dat)
+summary(mod2)
+r2 <- summary(mod2)$r.squared
+div_dat %>%
+  ggplot(aes(x = water_pH, y = richness)) + 
+  geom_point() + 
+  geom_smooth(method = "lm") + 
+  labs(x = "Water pH", y = "Richness")  +
+  annotate("text",
+           x = -Inf, y = Inf,
+           label = paste0("R^2 == ", round(r2, 3)),
+           parse = TRUE,
+           hjust = -0.1, vjust = 1.2)
 ```
 
 Next, we generate stacked bar charts of order relative abundances across sites. 
