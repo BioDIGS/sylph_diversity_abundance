@@ -16,6 +16,8 @@ library(tidyverse)
 library(ggpubr)
 library(vegan)
 library(ecodist)
+library(ggpubr)
+library(cowplot)
 ```
 
 ### Set database variable
@@ -255,6 +257,9 @@ Calculate Bray-Curtis distances between samples based on sets of variables and d
 # pcoa on distances from order abundances 
 bray_curtis_dist_comm <- vegdist(community_data_wide, method = "bray")
 bray_curtis_pcoa_comm <- pco(bray_curtis_dist_comm)
+(bray_curtis_pcoa_comm$values / sum(bray_curtis_pcoa_comm$values))[1:10]
+# first coordinate represents 29% of variation in BC dissimilarities, second represents 19%,
+# third represents 6% 
 
 # ndms on distances from order abundances
 set.seed(15)
@@ -309,7 +314,8 @@ bray_curtis_pcoa_df <- data.frame(site_read_id = rownames(bray_curtis_pcoa_comm$
                        state = str_remove(site_data$origin,"^.*,\\s*")), by = "site_id")
 
 # plot order abundance pcoa, colored by pH 
-ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = water_pH, shape = read_type)) +
+pcoa_ph <- ggplot(data = bray_curtis_pcoa_df, 
+                  aes(x=pcoa1, y=pcoa2, color = water_pH, shape = read_type)) +
   geom_point(size = 5) +
   labs(x = "PC1",
        y = "PC2",
@@ -317,18 +323,24 @@ ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = water_pH, shape
        shape = "Read type") +
   scale_color_viridis_c(end = .7) +
   scale_shape_manual(values = c(12, 16)) + 
-  theme(title = element_text(size = 10)) # makes titles smaller
+  theme(title = element_text(size = 10)) + # makes titles smaller 
+  theme_bw()
+pcoa_ph
 ggsave(paste0(fig_folder, "pcoa_colored_by_ph_", db, ".png"), height = 5, width = 6)
 
-ggplot(data = bray_curtis_pcoa_df, aes(x = pcoa1, y = water_pH, color = read_type)) +
+pc1_ph <- ggplot(data = bray_curtis_pcoa_df, 
+                 aes(x = pcoa1, y = water_pH, color = read_type)) +
   geom_point(size = 3) +
   labs(x = "PC1",
        y = "Water pH", 
        color = "Read type") +
-  theme(title = element_text(size = 10)) # makes titles smaller
+  theme(title = element_text(size = 10)) + # makes titles smaller
+  theme_bw()
+pc1_ph
 
 # plot order abundance pcoa, colored by temperature 
-ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = tmp, shape = read_type)) +
+pcoa_temp <- ggplot(data = bray_curtis_pcoa_df, 
+                    aes(x=pcoa1, y=pcoa2, color = tmp, shape = read_type)) +
   geom_point(size = 5) +
   labs(x = "PC1",
        y = "PC2",
@@ -336,18 +348,24 @@ ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = tmp, shape = re
        shape = "Read type") +
   scale_color_viridis_c(end = .7) +
   scale_shape_manual(values = c(12, 16)) + 
-  theme(title = element_text(size = 10)) 
+  theme(title = element_text(size = 10)) +
+  theme_bw()
+pcoa_temp
 ggsave(paste0(fig_folder, "pcoa_colored_by_temp_", db, ".png"), height = 5, width = 6)
 
-ggplot(data = bray_curtis_pcoa_df, aes(x = pcoa1, y = tmp, color = read_type)) +
+pc1_temp <- ggplot(data = bray_curtis_pcoa_df, 
+                   aes(x = pcoa1, y = tmp, color = read_type)) +
   geom_point(size = 3) +
   labs(x = "PC1",
        y = "Temperature", 
        color = "Read type") +
-  theme(title = element_text(size = 10)) # makes titles smaller
+  theme(title = element_text(size = 10)) + # makes titles smaller
+  theme_bw()
+pc1_temp
 
 # plot order abundance pcoa, colored by first coordinate of heavy metals pcoa
-ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = heavy1, shape = read_type)) +
+pcoa_metal <- ggplot(data = bray_curtis_pcoa_df, 
+                     aes(x=pcoa1, y=pcoa2, color = heavy1, shape = read_type)) +
   geom_point(size = 5) +
   labs(x = "PC1",
        y = "PC2",
@@ -355,15 +373,49 @@ ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = heavy1, shape =
        shape = "Read type") +
   scale_color_viridis_c(end = .7) +
   scale_shape_manual(values = c(12, 16)) + 
-  theme(title = element_text(size = 10)) 
+  theme(title = element_text(size = 10)) +
+  theme_bw()
+pcoa_metal
 ggsave(paste0(fig_folder, "pcoa_colored_by_heavy_metals_", db, ".png"), height = 5, width = 6)
 
-ggplot(data = bray_curtis_pcoa_df, aes(x = pcoa1, y = heavy1, color = read_type)) +
+pc1_metal <- ggplot(data = bray_curtis_pcoa_df, 
+                    aes(x = pcoa1, y = heavy1, color = read_type)) +
   geom_point(size = 3) +
   labs(x = "PC1",
        y = "Heavy metals PC 1", 
        color = "Read type") +
-  theme(title = element_text(size = 10)) # makes titles smaller
+  theme(title = element_text(size = 10)) + # makes titles smaller
+  theme_bw()
+pc1_metal 
+
+# put pcoa plots together
+shape_leg <- get_legend(pcoa_ph + guides(color = "none") +
+                          theme(legend.position = "right"))
+plots <- plot_grid(pcoa_ph + 
+                     guides(shape = "none") +
+                     theme(legend.position = "bottom"),
+                   pcoa_temp + 
+                     guides(shape = "none") +
+                     theme(legend.position = "bottom"),
+                   pcoa_metal + 
+                     guides(shape = "none") + 
+                     theme(legend.position = "bottom"),
+                   ncol = 3)
+plot_grid(plots, shape_leg, rel_widths = c(1, 0.1))
+ggsave(paste0(fig_folder, "pcoa_colored_by_env_var_", db, ".png"), height = 5, width = 12)
+
+# put pc1 plots together
+color_leg1 <- get_legend(pc1_ph +
+                          theme(legend.position = "right"))
+plots1 <- plot_grid(pc1_ph + 
+                     guides(color = "none"),
+                   pc1_temp + 
+                     guides(color = "none"),
+                   pc1_metal + 
+                     guides(color = "none"),
+                   ncol = 3)
+plot_grid(plots1, color_leg1, rel_widths = c(1, 0.1))
+ggsave(paste0(fig_folder, "pc1_colored_by_env_var_", db, ".png"), height = 5, width = 12)
 
 bray_curtis_pcoa_df %>% 
   select(pcoa1, heavy1, read_type, water_pH, tmp) %>% 
@@ -587,33 +639,38 @@ div_plot_dat %>%
 ```
 
 ```{r}
-mod1 <- lm(div_shannon ~ water_pH, data = div_dat)
+div_dat_short <- div_dat %>% filter(read_type == "short")
+mod1 <- lm(div_shannon ~ water_pH, data = div_dat_short)
 summary(mod1)
 r2 <- summary(mod1)$r.squared
-div_dat %>%
+div_dat_short %>%
   ggplot(aes(x = water_pH, y = div_shannon)) + 
   geom_point() + 
   geom_smooth(method = "lm") +
   labs(x = "Water pH", y = "Shannon diversity") +
+  theme_bw() + 
   annotate("text",
            x = -Inf, y = Inf,
            label = paste0("R^2 == ", round(r2, 3)),
            parse = TRUE,
            hjust = -0.1, vjust = 1.2)
+ggsave(paste0(fig_folder, "shannon_by_ph_", db, ".png"), width = 6, height = 6)
 
-mod2 <- lm(richness ~ water_pH, data = div_dat)
+mod2 <- lm(richness ~ water_pH, data = div_dat_short)
 summary(mod2)
 r2 <- summary(mod2)$r.squared
-div_dat %>%
+div_dat_short %>%
   ggplot(aes(x = water_pH, y = richness)) + 
   geom_point() + 
   geom_smooth(method = "lm") + 
   labs(x = "Water pH", y = "Richness")  +
+  theme_bw() + 
   annotate("text",
            x = -Inf, y = Inf,
            label = paste0("R^2 == ", round(r2, 3)),
            parse = TRUE,
            hjust = -0.1, vjust = 1.2)
+ggsave(paste0(fig_folder, "richness_by_ph_", db, ".png"), width = 6, height = 6)
 ```
 
 Next, we generate stacked bar charts of order relative abundances across sites. 

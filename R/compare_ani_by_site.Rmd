@@ -11,6 +11,7 @@ knitr::opts_chunk$set(fig.width = 12, fig.height = 7)
 ```{r, message = FALSE}
 library(tidyverse)
 library(ComplexHeatmap)
+library(vegan)
 ```
 
 ### Set database variable
@@ -18,8 +19,8 @@ library(ComplexHeatmap)
 We will consider sylph outputs from two different databases, the commonly used GTDB r226 database, and the larger GlobDB database. We will set an variable here to determine which database we want to analyze the output from. 
 
 ```{r}
-# db <- "GTDB"
-db <- "Glob_DB"
+db <- "GTDB"
+# db <- "Glob_DB"
 ```
 
 ### Load and clean data 
@@ -259,4 +260,114 @@ strain_df %>%
 
 anova_res <- aov(formula = ani ~ location, data = strain_df %>% filter(clade_name == strain))
 summary(anova_res)
+```
+
+Next, we want to compare the ANI values for sites across heavy metal values. First, we need to load and clean the soil data. 
+
+```{r load soil and site data}
+# read in site data and soil data
+snapshot <- "20260310" # snapshot of data we are pulling (if non-restricted)
+soil_data <- read.csv(paste0("https://raw.githubusercontent.com/FredHutch/GDSCNsoilsites/refs/heads/main/data/snapshots/BioDIGS_soil_", snapshot, ".csv"), row.names = 1)
+```
+
+```{r clean soil data}
+soil_data <- soil_data %>%
+  # select relevant soil variables
+  select(site_id, replicate, ends_with("EPA3051"), ends_with("Mehlich3"), 
+         "water_pH", "OM_by_LOI_pct", "vap", "pre", "cld", "tmp") %>%
+  filter(As_EPA3051 != "Not applicable" & As_EPA3051 != "Not yet tested") %>%
+  # As can't be detected lower than 3.0
+  mutate(As_EPA3051 = case_when(As_EPA3051 == "< 3.0" ~ "0", As_EPA3051 == "<3.0" ~ "0", TRUE ~ As_EPA3051)) %>%
+  # Cd can't be detected lower than 0.2
+  mutate(Cd_EPA3051 = case_when(Cd_EPA3051 == "< 0.2" ~ "0", Cd_EPA3051 == "<0.2" ~ "0", Cd_EPA3051 == "< 0.20" ~ "0", TRUE ~ Cd_EPA3051)) %>%
+  # Cu edge case
+  mutate(Cu_EPA3051 = case_when(Cu_EPA3051 == "< 2.0" ~ "0", TRUE ~ Cu_EPA3051)) %>%
+  # Pb edge case
+  mutate(Pb_EPA3051 = as.character(Pb_EPA3051)) %>% 
+  mutate(Pb_EPA3051 = case_when(Pb_EPA3051 == "< 2.0" ~ "0", TRUE ~ Pb_EPA3051)) %>%
+  # when OM_by_LOI_pct is coded as ISS, set to NA
+  mutate(OM_by_LOI_pct = case_when(OM_by_LOI_pct == "ISS" ~ NA, TRUE ~ OM_by_LOI_pct)) %>% 
+  # for environmental variables with "sampling date not yet available", set as NA 
+  mutate(across(c(vap, pre, cld, tmp), 
+                ~ na_if(.x, "sampling date not yet available"))) %>% 
+  # aggregate to site level
+  group_by(site_id) %>%
+  # average metal data at the site level
+  summarize(across(
+    !c(replicate),
+    ~ mean(as.numeric(.x))
+  ))
+```
+
+```{r}
+heavy_metal_vars <- colnames(soil_data)[str_detect(colnames(soil_data), "EPA3051")] # heavy metal testing
+```
+
+```{r}
+bray_curtis_dist_heavy <- soil_data %>%
+  column_to_rownames("site_id") %>%
+  select(all_of(heavy_metal_vars)) %>%
+  drop_na() %>% 
+  vegdist(method = "bray")
+bray_curtis_pcoa_heavy <- pco(bray_curtis_dist_heavy)
+```
+
+```{r}
+heavy_dat <- data.frame(site = rownames(bray_curtis_pcoa_heavy$vectors),
+                        heavy1 = bray_curtis_pcoa_heavy$vectors[, 1],
+                        lead = soil_data$Pb_EPA3051)
+```
+
+Make plot of ANI values (at sample and strain level) vs PCoA component 1 of heavy metals or lead. 
+
+```{r}
+full_df <- strain_df %>%
+  left_join(heavy_dat, by = "site")
+
+full_df %>%
+  ggplot(aes(x = heavy1, y = ani)) + 
+  geom_point(alpha = 0.3) +
+  labs(x = "Heavy metals PCoA component 1", y = "ANI value")
+
+full_df %>%
+  ggplot(aes(x = lead, y = ani)) + 
+  geom_point(alpha = 0.3) +
+  labs(x = "Lead measurement", y = "ANI value")
+```
+
+Make plot of median ANI values (at site level) vs PCoA component 1 of heavy metals or lead. 
+
+```{r}
+summary_df <- strain_df %>%
+  left_join(heavy_dat, by = "site") %>%
+  group_by(site, heavy1, lead) %>%
+  summarise(median_ani = median(ani))
+
+summary_df %>%
+  ggplot(aes(x = heavy1, y = median_ani)) + 
+  geom_point() +
+  labs(x = "Heavy metals PCoA component 1", y = "Median ANI value at site level")
+
+summary_df %>%
+  ggplot(aes(x = lead, y = median_ani)) + 
+  geom_point() +
+  labs(x = "Lead measurement", y = "Median ANI value at site level")
+```
+
+Plot ANI values (at sites) vs PCoA component 1 of heavy metals for specific strain. As with the example before, look at the most prevalent strain. 
+
+```{r}
+# example: look at most prevalent strain 
+strains <- strain_summary %>%
+  slice_max(order_by = n_sites, n = 6) %>%
+  pull(clade_name)
+strain <- strains[3]
+
+full_df %>%
+  filter(clade_name == strain) %>%
+  ggplot(aes(x = heavy1, y = ani)) + 
+  geom_point() +
+  labs(x = "Heavy metals PCoA component 1", y = "ANI value") + 
+  ggtitle("Heavy metals PC1 vs ANI for Nitrospira_C sp035719945") +
+  theme(plot.title = element_text(hjust = 0.5))
 ```
