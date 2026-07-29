@@ -29,16 +29,35 @@ db <- "GTDB"
 # db <- "GlobDB"
 ```
 
+### Set taxonomic level variable 
+
+We will run this analysis either at the order level or at the species level, using a variable here to determine which level.
+
+```{r}
+#level <- "order"
+#level_name <- "Order"
+level <- "species"
+level_name <- "Species"
+```
+
 ### Set soil and site data variables
 
 ```{r}
-restricted <- FALSE # TRUE if using data for all sites
+restricted <- TRUE # TRUE if using data for all sites
 if (restricted) {
-  fig_folder <- "../figures_restricted/" # if restricted, save figures one folder up, not git tracked
+  if (level == "order") {
+    fig_folder <- "../figures_restricted/" # if restricted, save figures one folder up, not git tracked
+  } else {
+      fig_folder <- "../figures_restricted/figures_restricted_species/" # if restricted, save figures one folder up, not git tracked
+  }
 } else {
-  fig_folder <- "figures/" # if not restricted, save as figures in this repo 
+  if (level == "order") {
+    fig_folder <- "figures/" # if not restricted, save as figures in this repo 
+  } else {
+    fig_folder <- "figures/figures_species/" # if not restricted, save as figures in this repo, in species folder
+  }
 }
-local <- FALSE # if FALSE pull site and soil data from GitHub, if TRUE pull locally from data folder one directory up 
+local <- TRUE # if FALSE pull site and soil data from GitHub, if TRUE pull locally from data folder one directory up 
 snapshot <- "20260310" # snapshot of data we are pulling (if non-restricted)
 
 if (restricted & (!local)) {
@@ -66,17 +85,29 @@ sylph_output <- sylph_output %>%
 The sylph output includes a row for each taxonomic level found in the sample. We want to perform an analysis at the order level, so we have to remove all rows that correspond to broader or finer taxonomic levels. 
 
 ```{r trim data}
-# only retain rows at the order level
-trimmed_data <- sylph_output %>%
-  filter(str_detect(clade_name, "o_"), # keep rows that have order, denoted by "o__"
+if (level == "order") {
+  # only retain rows at the order level
+  trimmed_data <- sylph_output %>%
+    filter(str_detect(clade_name, "o_"), # keep rows that have order, denoted by "o__"
            !str_detect(clade_name, "f_")) # remove rows that have family, denoted by "f__"
+} else {
+  # only retain rows at the order level
+  trimmed_data <- sylph_output %>%
+    filter(str_detect(clade_name, "s_"), # keep rows that have species, denoted by "s__"
+           !str_detect(clade_name, "t_")) # remove rows that have strain, denoted by "t__"
+}
 ```
 
-Now that we have data at the order level, we will remove other taxonomic information and remove the "o__" prefix. 
+Now that we have data at the order level, we will remove other taxonomic information and remove the taxonomy prefix. 
 
 ```{r clean taxonomy}
-trimmed_data <- trimmed_data %>%
+if (level == "order") {
+  trimmed_data <- trimmed_data %>%
   mutate(clade_name = str_replace(clade_name,".*?o__", "" )) # remove taxonomy info up to and including "o__" 
+} else {
+  trimmed_data <- trimmed_data %>%
+  mutate(clade_name = str_replace(clade_name,".*?s__", "" )) # remove taxonomy info up to and including "s__" 
+}
 ```
 
 For each sample, we will group by order and calculate mean relative abundances and sequence abundances. 
@@ -115,7 +146,7 @@ Clean the soil data and average measurements across replicates.
 soil_data <- soil_data %>%
   # select relevant soil variables
   select(site_id, replicate, ends_with("EPA3051"), ends_with("Mehlich3"), 
-         "water_pH", "OM_by_LOI_pct", "vap", "pre", "cld", "tmp") %>%
+         "water_pH", "OM_by_LOI_pct", "vap", "pre", "cld", "tmp", "wet") %>%
   filter(As_EPA3051 != "Not applicable" & As_EPA3051 != "Not yet tested") %>%
   # As can't be detected lower than 3.0
   mutate(As_EPA3051 = case_when(As_EPA3051 == "< 3.0" ~ "0", As_EPA3051 == "<3.0" ~ "0", TRUE ~ As_EPA3051)) %>%
@@ -247,7 +278,11 @@ environmental_vars <- c( # other environmental variables
   "pre",
   "cld",
   "tmp",
-  "pct_imp_2024" 
+  "pct_imp_2024",
+  "wet",
+  "fao_clay_frac",
+  "fao_gravel_frac",
+  "fao_sand_frac"
 )
 ```
 
@@ -448,6 +483,70 @@ ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = state, shape = 
   theme(title = element_text(size = 10)) 
 ggsave(paste0(fig_folder, "pcoa_colored_by_state_", db, ".png"), height = 7.5, width = 9)
 
+# plot order abundance pcoa, colored by precip
+ggplot(data = bray_curtis_pcoa_df, aes(x=pcoa1, y=pcoa2, color = pre, shape = read_type)) +
+  geom_point(size = 5) +
+  labs(x = "PC1",
+       y = "PC2",
+       color = "Precipitation",
+       shape = "Read type") +
+  scale_shape_manual(values = c(12, 16)) + 
+  theme(title = element_text(size = 10)) +
+  theme_bw()
+ggsave(paste0(fig_folder, "pcoa_colored_by_precipitation_", db, ".png"), height = 7.5, width = 9)
+
+# plot order abundance pcoa, colored by number of wet days
+ggplot(data = bray_curtis_pcoa_df, aes(x = pcoa1, y = pcoa2, color = wet, shape = read_type)) +
+  geom_point(size = 5) +
+  labs(x = "PC1",
+       y = "PC2",
+       color = "Wet day frequency",
+       shape = "Read type") +
+  scale_shape_manual(values = c(12, 16)) + 
+  theme(title = element_text(size = 10)) +
+  theme_bw()
+ggsave(paste0(fig_folder, "pcoa_colored_by_wet_", db, ".png"), height = 7.5, width = 9)
+
+# plot order abundance pcoa, colored by clay fraction
+ggplot(data = bray_curtis_pcoa_df, aes(x = pcoa1, y = pcoa2, color = fao_clay_frac, shape = read_type)) +
+  geom_point(size = 5) +
+  labs(x = "PC1",
+       y = "PC2",
+       color = "Fraction of clay in soil",
+       shape = "Read type") +
+  scale_shape_manual(values = c(12, 16)) + 
+  theme(title = element_text(size = 10)) +
+  theme_bw()
+ggsave(paste0(fig_folder, "pcoa_colored_by_clay_", db, ".png"), height = 7.5, width = 9)
+
+# plot order abundance pcoa, colored by gravel fraction
+ggplot(data = bray_curtis_pcoa_df, aes(x = pcoa1, y = pcoa2, color = fao_gravel_frac, shape = read_type)) +
+  geom_point(size = 5) +
+  labs(x = "PC1",
+       y = "PC2",
+       color = "Fraction of gravel in soil",
+       shape = "Read type") +
+  scale_shape_manual(values = c(12, 16)) + 
+  theme(title = element_text(size = 10)) +
+  theme_bw()
+ggsave(paste0(fig_folder, "pcoa_colored_by_gravel_", db, ".png"), height = 7.5, width = 9)
+
+# plot order abundance pcoa, colored by sand fraction
+ggplot(data = bray_curtis_pcoa_df, aes(x = pcoa1, y = pcoa2, color = fao_sand_frac, shape = read_type)) +
+  geom_point(size = 5) +
+  labs(x = "PC1",
+       y = "PC2",
+       color = "Fraction of sand in soil",
+       shape = "Read type") +
+  scale_shape_manual(values = c(12, 16)) + 
+  theme(title = element_text(size = 10)) +
+  theme_bw()
+ggsave(paste0(fig_folder, "pcoa_colored_by_sand_", db, ".png"), height = 7.5, width = 9)
+```
+
+Plot using NMDS as well. 
+
+```{r}
 # plot order abundance nmds, colored by pH 
 ggplot(data = bray_curtis_pcoa_df, aes(x=NMDS1, y=NMDS2, color = water_pH, shape = read_type)) +
   geom_point(size = 5) +
@@ -540,7 +639,7 @@ community_data %>%
     site_read_id, 
     fill= relative_abundance)) + 
   geom_tile() +
-  labs(y = "Sampling site", x = "Order", fill = "Relative\nabundance") +
+  labs(y = "Sampling site", x = level_name, fill = "Relative\nabundance") +
   scale_fill_viridis_c() +
   theme_minimal(base_size = 13) +
   theme(
@@ -695,7 +794,7 @@ full_data %>%
     )
   ) +
   geom_bar(stat = "identity", position = 'stack') +
-  labs(x = "Sample", y = "Relative Abundance", fill = "Order name") +
+  labs(x = "Sample", y = "Relative Abundance", fill = level_name) +
   scale_fill_discrete(guide = "none") +
   theme_minimal() +
   theme(axis.text.x = element_text(
@@ -721,7 +820,7 @@ community_data %>%
   )
   ) +
   geom_bar(stat = "identity", position = 'stack') +
-  labs(x = "Site Location", y = "Relative Abundance", fill = "Order name") +
+  labs(x = "Site Location", y = "Relative Abundance", fill = level_name) +
   scale_fill_discrete(guide = "none") +
   theme_minimal() +
   theme(axis.text.x = element_text(
@@ -754,7 +853,7 @@ community_data %>%
   )
   ) +
   geom_bar(stat = "identity", position = 'stack') +
-  labs(x = "Site Location", y = "Relative Abundance", fill = "Order name") +
+  labs(x = "Site Location", y = "Relative Abundance", fill = level_name) +
   scale_fill_discrete(guide = "none") +
   theme_minimal() +
   theme(axis.text.x = element_text(
@@ -787,7 +886,7 @@ community_data %>%
   )
   ) +
   geom_bar(stat = "identity", position = 'stack') +
-  labs(x = "Site Location", y = "Relative Abundance", fill = "Order name") +
+  labs(x = "Site Location", y = "Relative Abundance", fill = level_name) +
   scale_fill_discrete(guide = "none") +
   theme_minimal() +
   theme(axis.text.x = element_text(
@@ -815,7 +914,7 @@ community_data %>%
   )
   ) +
   geom_bar(stat = "identity", position = 'stack') +
-  labs(x = "Site Location", y = "Relative Abundance", fill = "Order name") +
+  labs(x = "Site Location", y = "Relative Abundance", fill = level_name) +
   scale_fill_discrete(guide = "none") +
   theme_minimal() +
   theme(axis.text.x = element_text(
@@ -874,7 +973,7 @@ ggplot(
   aes(x = site_read_id, y = relative_abundance, fill = clade_name)
 ) +
   geom_col(position = "stack") +
-  labs(x = "Site Location", y = "Relative Abundance", fill = "Order name") +
+  labs(x = "Site Location", y = "Relative Abundance", fill = level_name) +
   scale_fill_manual(values = fill_values, breaks = c(rev(order_levels), "other")) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5, size = 6)) +
@@ -897,7 +996,7 @@ community_data_top_n %>%
   mutate(site_read_id = factor(site_read_id, levels = site_order)) %>%
   ggplot(aes(x = site_read_id, y = relative_abundance, fill = clade_name)) +
   geom_col(position = "stack") +
-  labs(x = "Site Location", y = "Relative Abundance", fill = "Order name") +
+  labs(x = "Site Location", y = "Relative Abundance", fill = level_name) +
   scale_fill_manual(values = fill_values, breaks = c(rev(order_levels), "other")) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5, size = 6)) +
@@ -920,7 +1019,7 @@ community_data_top_n %>%
   mutate(site_read_id = factor(site_read_id, levels = site_order)) %>%
   ggplot(aes(x = site_read_id, y = relative_abundance, fill = clade_name)) +
   geom_col(position = "stack") +
-  labs(x = "Site Location", y = "Relative Abundance", fill = "Order name") +
+  labs(x = "Site Location", y = "Relative Abundance", fill = level_name) +
   scale_fill_manual(values = fill_values, breaks = c(rev(order_levels), "other")) +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5, size = 6)) +
@@ -941,7 +1040,7 @@ community_data_top_n %>%
   )
   ) +
   geom_bar(stat = "identity", position = 'stack') +
-  labs(x = "Site Location", y = "Relative Abundance", fill = "Order name") +
+  labs(x = "Site Location", y = "Relative Abundance", fill = level_name) +
   theme_minimal() +
   theme(axis.text.x = element_text(
     angle = 90,
